@@ -2,5 +2,7 @@ datetime
 fastapi
 uvicorn
 pydantic
+typing
 streamlit
 pandas
+sqlite3
