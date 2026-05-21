@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         LeetCode Spaced Repetition Auto-Logger
 // @namespace    http://tampermonkey.net/
-// @version      1.4
-// @description  Bypasses lockouts, locks execution via an atomic state guard, and safeguards cancel behavior.
+// @version      1.5
+// @description  Triggers ONLY on real code submissions, ignoring page refreshes.
 // @author       Mark
 // @match        https://leetcode.com/problems/*
 // @grant        GM_xmlhttpRequest
@@ -14,41 +14,47 @@
   "use strict";
 
   console.log(
-    "🚀 DOM Smart-Scraper v1.4 active. Listening for Accepted status...",
+    "🚀 DOM Smart-Scraper v1.5 active. Arming submission listeners...",
   );
 
-  let submissionLoggedForThisRun = false;
-  let lastUrl = location.href;
+  let watchForSuccess = false;
+  let submissionInProgress = false;
 
-  // Clean the execution state lock whenever you jump between problem pages
-  setInterval(() => {
-    if (location.href !== lastUrl) {
-      lastUrl = location.href;
-      submissionLoggedForThisRun = false;
-      console.log(
-        "🔄 Resetting submission lock guard for new problem context.",
+  // Listen for clicks on LeetCode's Submit button
+  document.addEventListener(
+    "click",
+    function (e) {
+      // Target LeetCode's explicit submission button attribute
+      const submitBtn = e.target.closest(
+        '[data-e2e-locator="console-submit-button"]',
       );
-    }
-  }, 1000);
+      if (submitBtn) {
+        console.log("⚡ Submit button clicked! Arming success detector...");
+        watchForSuccess = true;
+        submissionInProgress = false; // Reset lock for this fresh run
+      }
+    },
+    true,
+  );
 
   const observer = new MutationObserver((mutations) => {
-    // CRITICAL ATOMIC LOCK: Stop execution immediately if a submission run is already processing
-    if (submissionLoggedForThisRun) return;
+    // ONLY check the DOM if the user actually clicked "Submit" first
+    if (!watchForSuccess || submissionInProgress) return;
 
     const successBadge =
       document.querySelector('[data-e2e-locator="submission-result"]') ||
       document.querySelector(".text-green-s");
 
     if (successBadge && successBadge.textContent.includes("Accepted")) {
-      // Lock the gate instantly BEFORE calling any delayed async actions
-      submissionLoggedForThisRun = true;
-      console.log(
-        "🎯 Visual 'Accepted' card detected! Invoking processing pipeline...",
-      );
+      submissionInProgress = true; // Set lock
+      watchForSuccess = false; // Disarm detector until next button click
 
+      console.log("🎯 Fresh 'Accepted' status detected! Processing...");
+
+      // Delay slightly to let performance percentiles finish rendering on screen
       setTimeout(() => {
         processSuccessfulSubmission();
-      }, 600);
+      }, 1000);
     }
   });
 
@@ -104,7 +110,6 @@
       }
     });
 
-    // --- Prompt Safeguards ---
     const ratingInput = prompt(
       `"${titleClean}" Successfully Logged!\n\n` +
         "Rate your solving performance quality (1 to 5):\n" +
@@ -115,19 +120,15 @@
         "1 - Blocked entirely, required deep review",
     );
 
-    // Explicit check: If user hit Cancel (null), fallback gracefully to 3 instead of crashing
     let qualityScore = 3;
     if (ratingInput !== null) {
       const parsed = parseInt(ratingInput);
-      if (parsed >= 1 && parsed <= 5) {
-        qualityScore = parsed;
-      }
+      if (parsed >= 1 && parsed <= 5) qualityScore = parsed;
     }
 
     const notesInput = prompt(
       "Enter approach notes, time complexities, or flash observations:",
     );
-    // If user hit Cancel, fallback to an empty string instead of logging the text "null"
     const shortNotes = notesInput !== null ? notesInput : "";
 
     const payload = {
@@ -142,10 +143,7 @@
       quality_score: qualityScore,
     };
 
-    console.log(
-      "📤 Transmitting tracking payload directly to local server:",
-      payload,
-    );
+    console.log("📤 Sending payload:", payload);
 
     GM_xmlhttpRequest({
       method: "POST",
@@ -153,13 +151,10 @@
       headers: { "Content-Type": "application/json" },
       data: JSON.stringify(payload),
       onload: function (res) {
-        console.log("🎯 Synced database updates:", res.responseText);
+        console.log("🎯 Backend response received:", res.responseText);
       },
       onerror: function (err) {
-        console.error(
-          "❌ Link down to local server. Make sure uvicorn is running.",
-          err,
-        );
+        console.error("❌ Link down to local FastAPI server.", err);
       },
     });
   }
