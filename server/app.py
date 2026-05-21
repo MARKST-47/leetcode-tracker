@@ -22,16 +22,15 @@ class SubmissionPayload(BaseModel):
 class UpdateNotesPayload(BaseModel):
     notes: str
     quality_score: int
-    
-# Database initialization
+
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-        # Explicitly enforcing UNIQUE(title) at the column definition layer
+        # Removed the UNIQUE constraint from the title column
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS problems (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT UNIQUE NOT NULL,
+                title TEXT NOT NULL,
                 difficulty TEXT,
                 tags TEXT,
                 last_solved TIMESTAMP,
@@ -46,7 +45,7 @@ def init_db():
             )
         """)
         conn.commit()
-        
+
 init_db()
 
 @app.post("/log-submission")
@@ -56,11 +55,13 @@ async def log_submission(payload: SubmissionPayload):
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
         
-        # Look up by unique text title to grab spacing history accurately
-        cursor.execute(
-            "SELECT interval, ease_factor, repetitions FROM problems WHERE title = ?", 
-            (payload.title,)
-        )
+        # Look up only the MOST RECENT structural review state for this specific problem text
+        cursor.execute("""
+            SELECT interval, ease_factor, repetitions 
+            FROM problems 
+            WHERE title = ? 
+            ORDER BY last_solved DESC LIMIT 1
+        """, (payload.title,))
         row = cursor.fetchone()
         
         if row:
@@ -68,6 +69,7 @@ async def log_submission(payload: SubmissionPayload):
         else:
             current_interval, ease_factor, repetitions = 1, 2.5, 0
             
+        # Execute SM-2 recall matrix logic
         new_interval, new_ef, new_reps = calculate_next_review(
             current_interval, ease_factor, repetitions, payload.quality_score
         )
@@ -75,22 +77,12 @@ async def log_submission(payload: SubmissionPayload):
         next_review_date = now + datetime.timedelta(days=new_interval)
         tags_str = ",".join(payload.tags)
         
-        # Use INSERT OR REPLACE / ON CONFLICT on the unique title constraint
+        # INSERT raw chronological history entry cleanly as a completely distinct item row
         cursor.execute("""
             INSERT INTO problems (
                 title, difficulty, tags, last_solved, next_review, 
                 interval, ease_factor, repetitions, notes, runtime_percentile, memory_percentile, lang
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(title) DO UPDATE SET
-                last_solved = excluded.last_solved,
-                next_review = excluded.next_review,
-                interval = excluded.interval,
-                ease_factor = excluded.ease_factor,
-                repetitions = excluded.repetitions,
-                runtime_percentile = excluded.runtime_percentile,
-                memory_percentile = excluded.memory_percentile,
-                lang = excluded.lang,
-                notes = CASE WHEN excluded.notes != '' THEN excluded.notes ELSE problems.notes END
         """, (
             payload.title, payload.difficulty, tags_str, 
             now, next_review_date, new_interval, new_ef, new_reps, 
@@ -98,7 +90,7 @@ async def log_submission(payload: SubmissionPayload):
         ))
         conn.commit()
         
-    return {"status": "logged", "problem": payload.title}
+    return {"status": "chronologically_logged", "problem": payload.title}
 
 @app.get("/daily-suggestions")
 async def get_daily_suggestions():
