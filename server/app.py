@@ -27,10 +27,11 @@ class UpdateNotesPayload(BaseModel):
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
+        # Enforcing UNIQUE(title) ensures duplicates never happen
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS problems (
-                id INTEGER PRIMARY KEY,
-                title TEXT NOT NULL,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT UNIQUE NOT NULL,
                 difficulty TEXT,
                 tags TEXT,
                 last_solved TIMESTAMP,
