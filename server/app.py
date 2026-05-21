@@ -50,28 +50,23 @@ init_db()
 
 @app.post("/log-submission")
 async def log_submission(payload: SubmissionPayload):
-    """
-    Endpoint for the web extension to register a successful submission event.
-    """
     now = datetime.datetime.now()
     
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
         
-        # 1. Look up any existing records to maintain historical repetition states
+        # Look up by unique text title to grab spacing history accurately
         cursor.execute(
-            "SELECT interval, ease_factor, repetitions FROM problems WHERE id = ?", 
-            (payload.problem_id,)
+            "SELECT interval, ease_factor, repetitions FROM problems WHERE title = ?", 
+            (payload.title,)
         )
         row = cursor.fetchone()
         
         if row:
             current_interval, ease_factor, repetitions = row
         else:
-            # First time logging this specific task
             current_interval, ease_factor, repetitions = 1, 2.5, 0
             
-        # 2. Run SM-2 evaluation
         new_interval, new_ef, new_reps = calculate_next_review(
             current_interval, ease_factor, repetitions, payload.quality_score
         )
@@ -79,13 +74,13 @@ async def log_submission(payload: SubmissionPayload):
         next_review_date = now + datetime.timedelta(days=new_interval)
         tags_str = ",".join(payload.tags)
         
-        # 3. Perform atomic Upsert operation (Insert or Update on conflict)
+        # Use INSERT OR REPLACE / ON CONFLICT on the unique title constraint
         cursor.execute("""
             INSERT INTO problems (
-                id, title, difficulty, tags, last_solved, next_review, 
+                title, difficulty, tags, last_solved, next_review, 
                 interval, ease_factor, repetitions, notes, runtime_percentile, memory_percentile, lang
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(title) DO UPDATE SET
                 last_solved = excluded.last_solved,
                 next_review = excluded.next_review,
                 interval = excluded.interval,
@@ -96,17 +91,13 @@ async def log_submission(payload: SubmissionPayload):
                 lang = excluded.lang,
                 notes = CASE WHEN excluded.notes != '' THEN excluded.notes ELSE problems.notes END
         """, (
-            payload.problem_id, payload.title, payload.difficulty, tags_str, 
+            payload.title, payload.difficulty, tags_str, 
             now, next_review_date, new_interval, new_ef, new_reps, 
             payload.notes, payload.runtime_percentile, payload.memory_percentile, payload.lang
         ))
         conn.commit()
         
-    return {
-        "status": "logged", 
-        "problem": payload.title, 
-        "next_review_date": next_review_date.strftime("%Y-%m-%d %H:%M:%S")
-    }
+    return {"status": "logged", "problem": payload.title}
 
 @app.get("/daily-suggestions")
 async def get_daily_suggestions():
