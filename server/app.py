@@ -27,7 +27,7 @@ class UpdateNotesPayload(BaseModel):
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-        # Enforcing UNIQUE(title) ensures duplicates never happen
+        # Explicitly enforcing UNIQUE(title) at the column definition layer
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS problems (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
