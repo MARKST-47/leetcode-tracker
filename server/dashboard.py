@@ -10,7 +10,7 @@ st.set_page_config(
     page_title="LeetCode SR Hub",
     page_icon="🧠",
     layout="wide",
-    initial_sidebar_state="collapsed" # Maximizes horizontal workspace immediately
+    initial_sidebar_state="collapsed"
 )
 
 # Tight CSS to compress padding, margins, and excess whitespace
@@ -51,8 +51,9 @@ def fetch_dashboard_data():
                 elif d == check_date + datetime.timedelta(days=1): continue
                 else: break
         
-        due_df = pd.read_sql_query(f"SELECT title, difficulty, tags, interval, repetitions, notes FROM problems WHERE next_review <= '{now}'", conn)
-        history_df = pd.read_sql_query("SELECT title, difficulty, tags, last_solved, next_review, interval, repetitions, notes FROM problems ORDER BY last_solved DESC", conn)
+        # Pull ID along with metadata
+        due_df = pd.read_sql_query(f"SELECT id, title, difficulty, tags, interval, repetitions, notes FROM problems WHERE next_review <= '{now}'", conn)
+        history_df = pd.read_sql_query("SELECT id, title, difficulty, tags, last_solved, next_review, interval, repetitions, notes FROM problems ORDER BY last_solved DESC", conn)
         
     if not history_df.empty:
         history_df['last_solved'] = pd.to_datetime(history_df['last_solved']).dt.strftime('%m-%d %H:%M')
@@ -86,7 +87,6 @@ st.markdown("##")
 data_column, control_column = st.columns([2.2, 1])
 
 with data_column:
-    # Use clean tab layouts to prevent vertical page bloat
     tab1, tab2 = st.tabs(["🗓️ Active Review Queue", "🗄️ System Database Log"])
     
     with tab1:
@@ -111,12 +111,15 @@ with control_column:
     st.subheader("⚙️ Workspace Operations")
     
     if not history_df.empty:
-        problem_list = history_df['title'].unique().tolist()
-        selected_title = st.selectbox("Select Target Problem:", problem_list)
+        # Create option strings containing both the row ID and title: "id - title"
+        problem_options = history_df.apply(lambda row: f"{row['id']} - {row['title']}", axis=1).tolist()
+        selected_option = st.selectbox("Select Target Problem:", problem_options)
         
-        current_row = history_df[history_df['title'] == selected_title].iloc[0]
+        # Extract the integer ID out of the selection string
+        selected_id = int(selected_option.split(" - ")[0])
+        current_row = history_df[history_df['id'] == selected_id].iloc[0]
         
-        # Sub-Action 1: Clean Edit Panel
+        # Sub-Action 1: Clean Edit Panel targeting Row ID
         with st.expander("📝 Edit Notes / SM-2 Interval", expanded=True):
             updated_notes = st.text_area("Intuition Keys:", value=current_row['notes'], height=70)
             quality = st.slider("Performance Score:", 1, 5, 3, help="5=Perfect, 1=Total blackout")
@@ -124,7 +127,7 @@ with control_column:
             if st.button("Save Entry Modifications", use_container_width=True):
                 with get_db_connection() as conn:
                     cursor = conn.cursor()
-                    cursor.execute("SELECT interval, ease_factor, repetitions FROM problems WHERE title = ?", (selected_title,))
+                    cursor.execute("SELECT interval, ease_factor, repetitions FROM problems WHERE id = ?", (selected_id,))
                     interval, ef, reps = cursor.fetchone()
                     
                     from scheduler import calculate_next_review
@@ -133,20 +136,20 @@ with control_column:
                     
                     conn.execute("""
                         UPDATE problems SET notes = ?, interval = ?, ease_factor = ?, repetitions = ?, next_review = ?
-                        WHERE title = ?
-                    """, (updated_notes, new_interval, new_ef, new_reps, next_review_date, selected_title))
+                        WHERE id = ?
+                    """, (updated_notes, new_interval, new_ef, new_reps, next_review_date, selected_id))
                     conn.commit()
                 st.success("Record modified!")
                 st.rerun()
                 
-        # Sub-Action 2: Clean Eraser Tool to clear duplicates or bad logs instantly
+        # Sub-Action 2: Clean Eraser Tool targeting Row ID exclusively
         with st.expander("⚠️ Danger Zone"):
-            st.warning(f"Delete '{selected_title}' permanently?")
+            st.warning(f"Delete entry instance ID {selected_id} permanently?")
             if st.button("Confirm Delete Record", use_container_width=True, type="primary"):
                 with get_db_connection() as conn:
-                    conn.execute("DELETE FROM problems WHERE title = ?", (selected_title,))
+                    conn.execute("DELETE FROM problems WHERE id = ?", (selected_id,))
                     conn.commit()
-                st.success("Record deleted successfully.")
+                st.success(f"Instance {selected_id} deleted successfully.")
                 st.rerun()
     else:
         st.info("Log records via LeetCode to display control properties.")
