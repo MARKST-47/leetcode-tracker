@@ -6,27 +6,23 @@ import pandas as pd
 
 DB_PATH = "tracker.db"
 
-# Page Configuration for a modern look
 st.set_page_config(
-    page_title="LeetCode Spaced Repetition Tracker",
+    page_title="LeetCode SR Hub",
     page_icon="🧠",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed" # Maximizes horizontal workspace immediately
 )
 
-# Custom Styling to make it look clean and visually appealing
+# Tight CSS to compress padding, margins, and excess whitespace
 st.markdown("""
     <style>
-    .metric-card {
-        background-color: #f8f9fa;
-        padding: 20px;
-        border-radius: 10px;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.05);
-        text-align: center;
-    }
-    .stDataFrame {
-        border-radius: 10px;
-    }
+    .block-container { padding-top: 1rem; padding-bottom: 1rem; max-width: 95%; }
+    div.stForm { padding: 10px; border-radius: 8px; }
+    h1 { margin-bottom: 0rem; padding-bottom: 0rem; font-size: 2rem !important; }
+    h2 { margin-top: 0.5rem; margin-bottom: 0.5rem; font-size: 1.3rem !important; }
+    h3 { font-size: 1.1rem !important; }
+    .stMetric { background-color: #1e293b; padding: 8px 12px; border-radius: 6px; color: white; }
+    div[data-testid="stVerticalBlock"] > div { margin-bottom: -0.3rem; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -35,135 +31,122 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
-def load_metrics():
-    """Calculates top-level overview data."""
+def fetch_dashboard_data():
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     today_start = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
     
     with get_db_connection() as conn:
-        cursor = conn.cursor()
+        total = conn.execute("SELECT COUNT(*) FROM problems").fetchone()[0]
+        solved_today = conn.execute("SELECT COUNT(*) FROM problems WHERE last_solved >= ?", (today_start,)).fetchone()[0]
+        due = conn.execute("SELECT COUNT(*) FROM problems WHERE next_review <= ?", (now,)).fetchone()[0]
         
-        # Total solved
-        cursor.execute("SELECT COUNT(*) FROM problems")
-        total_solved = cursor.fetchone()[0]
+        # Streak Tracker
+        all_dates = conn.execute("SELECT DISTINCT date(last_solved) as solve_date FROM problems ORDER BY solve_date DESC").fetchall()
+        dates_list = [datetime.datetime.strptime(x['solve_date'], "%Y-%m-%d").date() for x in all_dates]
+        streak = 0
+        check_date = datetime.date.today()
+        if dates_list and (dates_list[0] == check_date or dates_list[0] == check_date - datetime.timedelta(days=1)):
+            for d in dates_list:
+                if d == check_date: streak += 1; check_date -= datetime.timedelta(days=1)
+                elif d == check_date + datetime.timedelta(days=1): continue
+                else: break
         
-        # Solved today
-        cursor.execute("SELECT COUNT(*) FROM problems WHERE last_solved >= ?", (today_start,))
-        solved_today = cursor.fetchone()[0]
+        due_df = pd.read_sql_query(f"SELECT title, difficulty, tags, interval, repetitions, notes FROM problems WHERE next_review <= '{now}'", conn)
+        history_df = pd.read_sql_query("SELECT title, difficulty, tags, last_solved, next_review, interval, repetitions, notes FROM problems ORDER BY last_solved DESC", conn)
         
-        # Due for review
-        cursor.execute("SELECT COUNT(*) FROM problems WHERE next_review <= ?", (now,))
-        due_count = cursor.fetchone()[0]
+    if not history_df.empty:
+        history_df['last_solved'] = pd.to_datetime(history_df['last_solved']).dt.strftime('%m-%d %H:%M')
+        history_df['next_review'] = pd.to_datetime(history_df['next_review']).dt.strftime('%m-%d')
         
-    return total_solved, solved_today, due_count
+    return total, solved_today, due, streak, due_df, history_df
 
-def load_problems(due_only=False):
-    """Loads problems into a pandas DataFrame for pretty display."""
-    query = "SELECT id, title, difficulty, tags, last_solved, next_review, interval, repetitions, notes FROM problems"
-    if due_only:
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        query += f" WHERE next_review <= '{now}'"
-    
-    with get_db_connection() as conn:
-        df = pd.read_sql_query(query, conn)
-        
-    # Clean up dates for user viewing
-    if not df.empty:
-        df['last_solved'] = pd.to_datetime(df['last_solved']).dt.strftime('%Y-%m-%d %H:%M')
-        df['next_review'] = pd.to_datetime(df['next_review']).dt.strftime('%Y-%m-%d')
-    return df
+def color_difficulty(val):
+    if val == 'Easy': return 'color: #22c55e; font-weight: bold;'
+    elif val == 'Medium': return 'color: #eab308; font-weight: bold;'
+    elif val == 'Hard': return 'color: #ef4444; font-weight: bold;'
+    return ''
 
-st.title("🧠 LeetCode Spaced Repetition Companion")
-st.subheader("Mastering algorithms through active recall.")
+# --- Load Application State ---
+total, today, due, streak, due_df, history_df = fetch_dashboard_data()
+
+# Header banner row
+st.title("🧠 LeetCode Spaced Repetition Workstation")
 st.markdown("---")
 
-# 1. Top Level Metrics Layout
-total, today, due = load_metrics()
+# Compact Metric strip layout
+m1, m2, m3, m4 = st.columns(4)
+with m1: st.metric("🔥 Streak", f"{streak} Days")
+with m2: st.metric("📋 Total Tracked", total)
+with m3: st.metric("✅ Solved Today", today)
+with m4: st.metric("⏳ Queue Pending", due, delta=f"{due} Due" if due > 0 else None, delta_color="inverse")
 
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric(label="Total Problems Tracked", value=total)
-with col2:
-    st.metric(label="Solved Today", value=today, delta=f"+{today}" if today > 0 else None)
-with col3:
-    st.metric(label="Reviews Due Today", value=due, delta=f"{due} pending" if due > 0 else "All caught up!", delta_color="inverse" if due > 0 else "normal")
+st.markdown("##")
 
-st.markdown("---")
+# Side-by-side Layout to maximize spacing use
+data_column, control_column = st.columns([2.2, 1])
 
-# 2. Daily Active Recall Queue Section
-st.header("📋 Today's Review Queue")
-due_df = load_problems(due_only=True)
-
-if due_df.empty:
-    st.success("🎉 Incredible job! Your review queue is completely empty for today.")
-else:
-    st.write("These problems are due for spacing intervals. Re-solve them to lock down the patterns.")
+with data_column:
+    # Use clean tab layouts to prevent vertical page bloat
+    tab1, tab2 = st.tabs(["🗓️ Active Review Queue", "🗄️ System Database Log"])
     
-    # Format difficulty styling cleanly
-    def color_difficulty(val):
-        if val == 'Easy': return 'color: green; font-weight: bold;'
-        elif val == 'Medium': return 'color: orange; font-weight: bold;'
-        elif val == 'Hard': return 'color: red; font-weight: bold;'
-        return ''
+    with tab1:
+        if due_df.empty:
+            st.success("🎉 Review queue is empty! Patterns locked down.")
+        else:
+            st.dataframe(
+                due_df.style.map(color_difficulty, subset=['difficulty']),
+                use_container_width=True, hide_index=True, height=280
+            )
+            
+    with tab2:
+        if not history_df.empty:
+            st.dataframe(
+                history_df.style.map(color_difficulty, subset=['difficulty']),
+                use_container_width=True, hide_index=True, height=350
+            )
+        else:
+            st.info("System workspace is currently empty.")
+
+with control_column:
+    st.subheader("⚙️ Workspace Operations")
+    
+    if not history_df.empty:
+        problem_list = history_df['title'].unique().tolist()
+        selected_title = st.selectbox("Select Target Problem:", problem_list)
         
-    st.dataframe(
-        due_df[['id', 'title', 'difficulty', 'tags', 'interval', 'repetitions', 'notes']].style.map(color_difficulty, subset=['difficulty']),
-        use_container_width=True,
-        hide_index=True
-    )
-
-st.markdown("---")
-
-# 3. Interactive Sidebar to update notes manually
-st.sidebar.header("Update Problem Record")
-st.sidebar.write("Refine parameters or update details after a manual review:")
-
-all_df = load_problems(due_only=False)
-
-if not all_df.empty:
-    problem_options = all_df.apply(lambda row: f"{row['id']} - {row['title']}", axis=1).tolist()
-    selected_problem_str = st.sidebar.selectbox("Select Problem", problem_options)
-    selected_id = int(selected_problem_str.split(" - ")[0])
-    
-    current_row = all_df[all_df['id'] == selected_id].iloc[0]
-    
-    # Input options for editing notes
-    new_notes = st.sidebar.text_area("Approach Notes / Intuition Key", value=current_row['notes'])
-    quality = st.sidebar.slider(
-        "Performance Rating (SM-2)", 
-        min_value=1, max_value=5, value=3,
-        help="1=Forgot totally, 3=Solved with major hiccups, 5=Flawless instant solution"
-    )
-    
-    if st.sidebar.button("Save Updates"):
-        # Make a background patch call to your backend architecture or execute SQLite safely directly
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            # If performance rating is lower than 3, adjust review interval schedules instantly
-            now = datetime.datetime.now()
-            from scheduler import calculate_next_review
+        current_row = history_df[history_df['title'] == selected_title].iloc[0]
+        
+        # Sub-Action 1: Clean Edit Panel
+        with st.expander("📝 Edit Notes / SM-2 Interval", expanded=True):
+            updated_notes = st.text_area("Intuition Keys:", value=current_row['notes'], height=70)
+            quality = st.slider("Performance Score:", 1, 5, 3, help="5=Perfect, 1=Total blackout")
             
-            cursor.execute("SELECT interval, ease_factor, repetitions FROM problems WHERE id = ?", (selected_id,))
-            interval, ef, reps = cursor.fetchone()
-            
-            new_interval, new_ef, new_reps = calculate_next_review(interval, ef, reps, quality)
-            next_review_date = now + datetime.timedelta(days=new_interval)
-            
-            cursor.execute("""
-                UPDATE problems 
-                SET notes = ?, interval = ?, ease_factor = ?, repetitions = ?, next_review = ?
-                WHERE id = ?
-            """, (new_notes, new_interval, new_ef, new_reps, next_review_date, selected_id))
-            conn.commit()
-            
-        st.sidebar.success("Problem specs patched successfully!")
-        st.rerun()
-else:
-    st.sidebar.info("No problems logged yet. Complete a submission on LeetCode to populate metrics!")
-
-# 4. Master Problem History View
-st.header("🗄️ Full Database History")
-if not all_df.empty:
-    st.dataframe(all_df, use_container_width=True, hide_index=True)
-else:
-    st.info("Your database workspace is currently empty.")
+            if st.button("Save Entry Modifications", use_container_width=True):
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT interval, ease_factor, repetitions FROM problems WHERE title = ?", (selected_title,))
+                    interval, ef, reps = cursor.fetchone()
+                    
+                    from scheduler import calculate_next_review
+                    new_interval, new_ef, new_reps = calculate_next_review(interval, ef, reps, quality)
+                    next_review_date = datetime.datetime.now() + datetime.timedelta(days=new_interval)
+                    
+                    conn.execute("""
+                        UPDATE problems SET notes = ?, interval = ?, ease_factor = ?, repetitions = ?, next_review = ?
+                        WHERE title = ?
+                    """, (updated_notes, new_interval, new_ef, new_reps, next_review_date, selected_title))
+                    conn.commit()
+                st.success("Record modified!")
+                st.rerun()
+                
+        # Sub-Action 2: Clean Eraser Tool to clear duplicates or bad logs instantly
+        with st.expander("⚠️ Danger Zone"):
+            st.warning(f"Delete '{selected_title}' permanently?")
+            if st.button("Confirm Delete Record", use_container_width=True, type="primary"):
+                with get_db_connection() as conn:
+                    conn.execute("DELETE FROM problems WHERE title = ?", (selected_title,))
+                    conn.commit()
+                st.success("Record deleted successfully.")
+                st.rerun()
+    else:
+        st.info("Log records via LeetCode to display control properties.")
