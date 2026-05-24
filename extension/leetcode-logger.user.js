@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         LeetCode Spaced Repetition Auto-Logger
 // @namespace    http://tampermonkey.net/
-// @version      1.5
-// @description  Triggers ONLY on real code submissions, ignoring page refreshes.
+// @version      2.0
+// @description  Logs accepted submissions to local SR backend. Fires exactly once per submission click. Immune to refreshes, SPA navigation, and React re-renders.
 // @author       Mark
 // @match        https://leetcode.com/problems/*
 // @grant        GM_xmlhttpRequest
@@ -13,65 +13,118 @@
 (function () {
   "use strict";
 
-  console.log(
-    "🚀 DOM Smart-Scraper v1.5 active. Arming submission listeners...",
-  );
+  console.log("🚀 LeetCode SR Logger v2.0 active.");
 
+  // --- State ---
+  // watchForSuccess: armed only after the user physically clicks Submit.
+  // submissionInProgress: one-shot lock so the observer doesn't double-fire
+  //   within a single mutation burst for the same click.
   let watchForSuccess = false;
   let submissionInProgress = false;
+  let currentSlug = getSlug(); // Track slug so we can detect SPA navigation.
 
-  // Listen for clicks on LeetCode's Submit button
+  // ─── SessionStorage deduplication key ───────────────────────────────────────
+  // After a successful POST we stamp sessionStorage with the slug + a 5-minute
+  // window. This is the last-resort guard against any edge case where the two
+  // in-memory flags (watchForSuccess, submissionInProgress) could be bypassed
+  // (e.g. rapid React re-renders that momentarily re-insert the Accepted badge).
+  function dedupKey(slug) {
+    return `lc_sr_logged_${slug}`;
+  }
+
+  function hasLoggedRecently(slug) {
+    const ts = sessionStorage.getItem(dedupKey(slug));
+    if (!ts) return false;
+    return Date.now() - parseInt(ts, 10) < 5 * 60 * 1000; // 5-minute window
+  }
+
+  function markLogged(slug) {
+    sessionStorage.setItem(dedupKey(slug), Date.now().toString());
+  }
+
+  // ─── SPA navigation detection ────────────────────────────────────────────────
+  // LeetCode is a React SPA. Navigating between problems does NOT reload the
+  // page, so our module-level variables survive. Without this, submissionInProgress
+  // from problem A would block logging for problem B until the user clicks Submit.
+  function getSlug() {
+    return window.location.pathname.split("/")[2] || "";
+  }
+
+  function onUrlChange() {
+    const newSlug = getSlug();
+    if (newSlug !== currentSlug) {
+      console.log(
+        `🔄 SPA navigation detected (${currentSlug} → ${newSlug}). Resetting SR logger state.`,
+      );
+      currentSlug = newSlug;
+      watchForSuccess = false;
+      submissionInProgress = false;
+    }
+  }
+
+  // Poll for URL changes (LeetCode doesn't fire popstate reliably for internal nav).
+  setInterval(onUrlChange, 750);
+
+  // ─── Submit button listener ──────────────────────────────────────────────────
   document.addEventListener(
     "click",
     function (e) {
-      // Target LeetCode's explicit submission button attribute
       const submitBtn = e.target.closest(
         '[data-e2e-locator="console-submit-button"]',
       );
-      if (submitBtn) {
-        console.log("⚡ Submit button clicked! Arming success detector...");
-        watchForSuccess = true;
-        submissionInProgress = false; // Reset lock for this fresh run
-      }
+      if (!submitBtn) return;
+
+      console.log("⚡ Submit clicked — arming Accepted detector.");
+      // Refresh slug in case SPA navigation happened between the interval polls.
+      currentSlug = getSlug();
+      watchForSuccess = true;
+      submissionInProgress = false; // Allow a fresh detection for this new attempt.
     },
     true,
   );
 
-  const observer = new MutationObserver((mutations) => {
-    // ONLY check the DOM if the user actually clicked "Submit" first
-    if (!watchForSuccess || submissionInProgress) return;
+  // ─── MutationObserver ────────────────────────────────────────────────────────
+  const observer = new MutationObserver(() => {
+    // Gate 1: only active after the user clicked Submit.
+    if (!watchForSuccess) return;
+    // Gate 2: one-shot lock — don't re-enter if we're already handling this result.
+    if (submissionInProgress) return;
 
-    const successBadge =
+    const resultBadge =
       document.querySelector('[data-e2e-locator="submission-result"]') ||
       document.querySelector(".text-green-s");
 
-    if (successBadge && successBadge.textContent.includes("Accepted")) {
-      submissionInProgress = true; // Set lock
-      watchForSuccess = false; // Disarm detector until next button click
+    if (!resultBadge || !resultBadge.textContent.includes("Accepted")) return;
 
-      console.log("🎯 Fresh 'Accepted' status detected! Processing...");
-
-      // Delay slightly to let performance percentiles finish rendering on screen
-      setTimeout(() => {
-        processSuccessfulSubmission();
-      }, 1000);
+    // Gate 3: sessionStorage dedup — last-resort guard against double-logging.
+    if (hasLoggedRecently(currentSlug)) {
+      console.log(`⏭️ Already logged "${currentSlug}" recently — skipping.`);
+      watchForSuccess = false;
+      return;
     }
+
+    // Lock everything before the async timeout so no re-entry can happen.
+    submissionInProgress = true;
+    watchForSuccess = false;
+
+    console.log("🎯 Fresh Accepted detected — processing in 1 s...");
+    // Wait a moment for LeetCode to finish rendering the percentile stats.
+    setTimeout(() => processSuccessfulSubmission(currentSlug), 1000);
   });
 
   observer.observe(document.body, { childList: true, subtree: true });
 
-  function processSuccessfulSubmission() {
-    const pathSegments = window.location.pathname.split("/");
-    const slug = pathSegments[2];
+  // ─── Core processing ─────────────────────────────────────────────────────────
+  function processSuccessfulSubmission(slug) {
+    // Title from URL slug.
     const titleClean = slug
       .split("-")
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
       .join(" ");
 
-    // 1. Precise Difficulty Extraction
+    // 1. Difficulty
     let difficulty = "Medium";
-    const diffElements = document.querySelectorAll("div");
-    for (let el of diffElements) {
+    for (const el of document.querySelectorAll("div")) {
       const txt = el.textContent.trim();
       if (
         (txt === "Easy" || txt === "Medium" || txt === "Hard") &&
@@ -85,77 +138,132 @@
       }
     }
 
-    // 2. Precise Topic Tags Extraction
+    // 2. Topic tags
     let tags = [];
-    document.querySelectorAll('a[href^="/tag/"]').forEach((tagEl) => {
-      const tagText = tagEl.textContent.trim();
-      if (tagText && !tags.includes(tagText)) {
-        tags.push(tagText);
-      }
+    document.querySelectorAll('a[href^="/tag/"]').forEach((el) => {
+      const t = el.textContent.trim();
+      if (t && !tags.includes(t)) tags.push(t);
     });
-    if (tags.length === 0) {
-      tags = ["Algorithms"];
-    }
+    if (tags.length === 0) tags = ["Algorithms"];
 
-    // 3. Runtime Percentiles
+    // 3. Runtime / memory percentiles
     let runtimePercent = 0.0;
     let memoryPercent = 0.0;
     document.querySelectorAll("span").forEach((el) => {
       if (el.textContent.includes("Beats")) {
-        const match = el.textContent.match(/Beats\s+([\d.]+)\%/);
-        if (match && match[1]) {
+        const match = el.textContent.match(/Beats\s+([\d.]+)%/);
+        if (match) {
           if (runtimePercent === 0.0) runtimePercent = parseFloat(match[1]);
           else if (memoryPercent === 0.0) memoryPercent = parseFloat(match[1]);
         }
       }
     });
 
+    // 4. Language — read from the editor language selector button.
+    let lang = detectLanguage();
+
+    // 5. Quality rating prompt — user can cancel to abort logging entirely.
     const ratingInput = prompt(
-      `"${titleClean}" Successfully Logged!\n\n` +
-        "Rate your solving performance quality (1 to 5):\n" +
-        "5 - Perfect execution (Optimal strategy, no hints, fast)\n" +
-        "4 - Solved with minor bugs or hesitation\n" +
-        "3 - Solved suboptimal approach / heavy struggling\n" +
-        "2 - Failed, but understood solution completely\n" +
-        "1 - Blocked entirely, required deep review",
+      `✅ "${titleClean}" — Accepted!\n\n` +
+        "Rate your solving quality (1–5), or press Cancel to skip logging:\n\n" +
+        "5 — Perfect recall, optimal approach, no hints\n" +
+        "4 — Solved with minor bugs or brief hesitation\n" +
+        "3 — Solved but suboptimal / heavy struggle\n" +
+        "2 — Failed, but understood the solution fully\n" +
+        "1 — Completely blocked, required deep review",
     );
 
-    let qualityScore = 3;
-    if (ratingInput !== null) {
-      const parsed = parseInt(ratingInput);
-      if (parsed >= 1 && parsed <= 5) qualityScore = parsed;
+    // Cancelled rating prompt → abort; don't log this submission.
+    if (ratingInput === null) {
+      console.log("🚫 Logging cancelled by user (rating prompt dismissed).");
+      // Release the lock so the user can re-submit if they want.
+      submissionInProgress = false;
+      return;
     }
 
+    let qualityScore = 3;
+    const parsed = parseInt(ratingInput, 10);
+    if (parsed >= 1 && parsed <= 5) qualityScore = parsed;
+
     const notesInput = prompt(
-      "Enter approach notes, time complexities, or flash observations:",
+      "📝 Notes, approach, complexity — or press Cancel to log without notes:",
     );
+    // A cancelled notes prompt is fine — just log with empty notes.
     const shortNotes = notesInput !== null ? notesInput : "";
 
     const payload = {
       problem_id: 0,
       title: titleClean,
-      difficulty: difficulty,
-      tags: tags,
+      difficulty,
+      tags,
       runtime_percentile: runtimePercent,
       memory_percentile: memoryPercent,
-      lang: "Python/Dynamic",
+      lang,
       notes: shortNotes,
       quality_score: qualityScore,
     };
 
-    console.log("📤 Sending payload:", payload);
+    console.log("📤 Sending SR payload:", payload);
 
     GM_xmlhttpRequest({
       method: "POST",
       url: "http://127.0.0.1:8000/log-submission",
       headers: { "Content-Type": "application/json" },
       data: JSON.stringify(payload),
-      onload: function (res) {
-        console.log("🎯 Backend response received:", res.responseText);
+      onload(res) {
+        console.log("✅ SR backend acknowledged:", res.responseText);
+        // Stamp sessionStorage ONLY after a confirmed successful POST.
+        markLogged(slug);
       },
-      onerror: function (err) {
-        console.error("❌ Link down to local FastAPI server.", err);
+      onerror(err) {
+        console.error(
+          "❌ SR backend unreachable. Is the FastAPI server running?",
+          err,
+        );
+        // Release the lock on failure so the user can try again without resubmitting.
+        submissionInProgress = false;
       },
     });
+  }
+
+  // ─── Language detection ───────────────────────────────────────────────────────
+  function detectLanguage() {
+    // LeetCode renders the active language on the editor toolbar button.
+    const langBtn = document.querySelector(
+      '[data-e2e-locator="console-lang-select-btn"]',
+    );
+    if (langBtn) {
+      const txt = langBtn.textContent.trim();
+      if (txt) return txt;
+    }
+
+    // Fallback: scan visible text for a known language name near the code area.
+    const knownLangs = [
+      "Python3",
+      "Python",
+      "JavaScript",
+      "TypeScript",
+      "Java",
+      "C++",
+      "C",
+      "Go",
+      "Ruby",
+      "Swift",
+      "Kotlin",
+      "Rust",
+      "Scala",
+      "PHP",
+      "C#",
+      "Dart",
+      "Elixir",
+      "Erlang",
+      "Racket",
+    ];
+    for (const el of document.querySelectorAll("button, span, div")) {
+      const txt = el.textContent.trim();
+      if (knownLangs.includes(txt)) return txt;
+    }
+
+    return "Unknown";
   }
 })();
