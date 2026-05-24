@@ -1,13 +1,14 @@
 import datetime
 import sqlite3
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from scheduler import calculate_next_review
-
+ 
 app = FastAPI(title="Leetcode Spaced Repetition Companion Server")
 DB_PATH = "tracker.db"
-
+ 
+ 
 class SubmissionPayload(BaseModel):
     problem_id: int
     title: str
@@ -17,16 +18,17 @@ class SubmissionPayload(BaseModel):
     memory_percentile: Optional[float] = 0.0
     lang: str
     notes: Optional[str] = ""
-    quality_score: Optional[int] = 3  # Default to an average passing score if not provided
-
+    quality_score: Optional[int] = 3
+ 
+ 
 class UpdateNotesPayload(BaseModel):
     notes: str
     quality_score: int
-
+ 
+ 
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-        # Removed the UNIQUE constraint from the title column
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS problems (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,100 +47,131 @@ def init_db():
             )
         """)
         conn.commit()
-
+ 
+ 
 init_db()
-
+ 
+ 
 @app.post("/log-submission")
 async def log_submission(payload: SubmissionPayload):
     now = datetime.datetime.now()
-    
+ 
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-        
-        # Look up only the MOST RECENT structural review state for this specific problem text
+ 
+        # Carry forward the SM-2 state from the most recent solve of this problem.
         cursor.execute("""
-            SELECT interval, ease_factor, repetitions 
-            FROM problems 
-            WHERE title = ? 
-            ORDER BY last_solved DESC LIMIT 1
+            SELECT interval, ease_factor, repetitions
+            FROM problems
+            WHERE title = ?
+            ORDER BY last_solved DESC
+            LIMIT 1
         """, (payload.title,))
         row = cursor.fetchone()
-        
+ 
         if row:
             current_interval, ease_factor, repetitions = row
         else:
             current_interval, ease_factor, repetitions = 1, 2.5, 0
-            
-        # Execute SM-2 recall matrix logic
+ 
         new_interval, new_ef, new_reps = calculate_next_review(
             current_interval, ease_factor, repetitions, payload.quality_score
         )
-        
+ 
         next_review_date = now + datetime.timedelta(days=new_interval)
         tags_str = ",".join(payload.tags)
-        
-        # INSERT raw chronological history entry cleanly as a completely distinct item row
+ 
         cursor.execute("""
             INSERT INTO problems (
-                title, difficulty, tags, last_solved, next_review, 
-                interval, ease_factor, repetitions, notes, runtime_percentile, memory_percentile, lang
+                title, difficulty, tags, last_solved, next_review,
+                interval, ease_factor, repetitions, notes,
+                runtime_percentile, memory_percentile, lang
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            payload.title, payload.difficulty, tags_str, 
-            now, next_review_date, new_interval, new_ef, new_reps, 
-            payload.notes, payload.runtime_percentile, payload.memory_percentile, payload.lang
+            payload.title, payload.difficulty, tags_str,
+            now, next_review_date, new_interval, new_ef, new_reps,
+            payload.notes, payload.runtime_percentile, payload.memory_percentile,
+            payload.lang,
         ))
         conn.commit()
-        
-    return {"status": "chronologically_logged", "problem": payload.title}
-
+ 
+    return {
+        "status": "logged",
+        "problem": payload.title,
+        "next_review": next_review_date.strftime("%Y-%m-%d"),
+        "interval_days": new_interval,
+    }
+ 
+ 
 @app.get("/daily-suggestions")
 async def get_daily_suggestions():
     """
-    Fetches problems that are currently due or past due for active recall.
+    Returns problems that are due for review, deduplicated by title —
+    only the row from the most recent solve session is considered.
+    Previously this returned every historical row for a problem, which
+    caused duplicates in the queue.
     """
     now = datetime.datetime.now()
     with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row  # Returns query rows mapping like python dictionaries
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, title, difficulty, tags, next_review, interval FROM problems WHERE next_review <= ? ORDER BY next_review ASC", 
-            (now,)
-        )
+        # Join against the latest solve per title so we only check the
+        # current SM-2 state, not every historical entry.
+        cursor.execute("""
+            SELECT p.id, p.title, p.difficulty, p.tags, p.next_review, p.interval
+            FROM problems p
+            INNER JOIN (
+                SELECT title, MAX(last_solved) AS max_solved
+                FROM problems
+                GROUP BY title
+            ) latest
+              ON p.title = latest.title
+             AND p.last_solved = latest.max_solved
+            WHERE p.next_review <= ?
+            ORDER BY p.next_review ASC
+        """, (now,))
         due_problems = [dict(row) for row in cursor.fetchall()]
-        
+ 
     return {"review_queue": due_problems}
-
+ 
+ 
 @app.patch("/update-problem/{problem_id}")
 async def update_problem_review(problem_id: int, payload: UpdateNotesPayload):
     """
-    Optional manual refinement endpoint to update notes or recalculate spacing 
-    manually after executing a scheduled review session.
+    Manual refinement endpoint: update notes or recalculate spacing for
+    a specific row after an out-of-band review session.
     """
     now = datetime.datetime.now()
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT interval, ease_factor, repetitions FROM problems WHERE id = ?", (problem_id,))
+        cursor.execute(
+            "SELECT interval, ease_factor, repetitions FROM problems WHERE id = ?",
+            (problem_id,),
+        )
         row = cursor.fetchone()
-        
+ 
         if not row:
             raise HTTPException(status_code=404, detail="Problem record not found.")
-            
+ 
         current_interval, ease_factor, repetitions = row
         new_interval, new_ef, new_reps = calculate_next_review(
             current_interval, ease_factor, repetitions, payload.quality_score
         )
         next_review_date = now + datetime.timedelta(days=new_interval)
-        
+ 
         cursor.execute("""
-            UPDATE problems SET 
-                notes = ?, 
-                interval = ?, 
-                ease_factor = ?, 
-                repetitions = ?, 
+            UPDATE problems SET
+                notes = ?,
+                interval = ?,
+                ease_factor = ?,
+                repetitions = ?,
                 next_review = ?
             WHERE id = ?
         """, (payload.notes, new_interval, new_ef, new_reps, next_review_date, problem_id))
         conn.commit()
-        
-    return {"status": "updated", "next_review_date": next_review_date.strftime("%Y-%m-%d")}
+ 
+    return {
+        "status": "updated",
+        "next_review_date": next_review_date.strftime("%Y-%m-%d"),
+        "interval_days": new_interval,
+    }
